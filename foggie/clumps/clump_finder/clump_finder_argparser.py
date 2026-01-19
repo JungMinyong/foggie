@@ -48,6 +48,13 @@ def parse_args():
                         help='Minimum cells required to define a clump. Default is 20')
     parser.set_defaults(min_cells=20)
 
+    parser.add_argument('--find_cold_clumps', metavar='find_cold_clumps', type=bool, action=argparse.BooleanOptionalAction, \
+                        help='Identify clumps with temperature below --cold_temperature_threshold instead of the default > threshold search. Default is False.')
+    parser.set_defaults(find_cold_clumps=False)
+
+    parser.add_argument('--cold_temperature_threshold', metavar='cold_temperature_threshold', type=float, action='store', \
+                        help='Temperature threshold (K) used when --find_cold_clumps is set. Default is 10**4.5 K.')
+    parser.set_defaults(cold_temperature_threshold=10**4.5)
 
     parser.add_argument('--nthreads', metavar='nthreads', type=int, action='store', \
                         help='How many threads to run on? Defaults to num_cores-1.')
@@ -197,6 +204,8 @@ def get_default_args():
         step=2,
         mask_disk=False,
         min_cells=20,
+        find_cold_clumps=False,
+        cold_temperature_threshold=10**4.5,
         nthreads=None,
         Nsubarrays=64,
         clumping_field="density",

@@ -103,6 +103,8 @@ from scipy.ndimage import binary_closing
     --step: By what factor should the density cutoff be incremented during each step? Default is 2
 
     --min_cells: What is the minimum cell count (on the uniform covering grid) to define as a "clump"
+    --find_cold_clumps: Set to True to identify clumps with temperature below --cold_temperature_threshold instead of above a density threshold.
+    --cold_temperature_threshold: Temperature threshold (in Kelvin) used when --find_cold_clumps is True. Default is 10**4.5.
 
     --include_diagonal_neighbors: Include cells that neighbor on the diagonal during marching cubes. Default is False.
     --mask_disk: Should the disk be masked out? Default is False. Not needed any more, but may offer performance upgrades
@@ -199,7 +201,10 @@ class Clump:
         self.tree_level=tree_level
         
         if self.tree_level==0:
-            self.n_levels = np.ceil( np.log(args.clump_max / args.clump_min) / np.log(args.step) ).astype(int)
+            if args.find_cold_clumps:
+                self.n_levels = 1
+            else:
+                self.n_levels = np.ceil( np.log(args.clump_max / args.clump_min) / np.log(args.step) ).astype(int)
             print("n_levels=",self.n_levels)
             self.clump_tree=[]
             for i in range(0,self.n_levels):
@@ -669,13 +674,22 @@ class Clump:
 
 
 
+        mask_fill_value = np.inf if args.find_cold_clumps else 0
+
         if ids_to_ignore is not None:
-             self.ucg[ np.isin(self.cell_id_ucg , ids_to_ignore) ] = 0 #mask out these ids
+             self.ucg[ np.isin(self.cell_id_ucg , ids_to_ignore) ] = mask_fill_value #mask out these ids
 
-        self.ucg[np.isnan(self.ucg)]=0
+        if args.find_cold_clumps:
+            self.ucg[np.isnan(self.ucg)]=np.inf
+        else:
+            self.ucg[np.isnan(self.ucg)]=0
 
-        if (np.max(self.ucg) < clump_threshold):
-            print("ALL CELLS ARE BELOW CURRENT DENSITY THRESHOLD...")
+        if args.find_cold_clumps:
+            if np.min(self.ucg) >= clump_threshold:
+                print("ALL CELLS ARE ABOVE CURRENT TEMPERATURE THRESHOLD...")
+                return
+        elif (np.max(self.ucg) < clump_threshold):
+            print("ALL CELLS ARE BELOW CURRENT CLUMPING THRESHOLD...")
             return
             
         parallelize_marching_cubes=False
@@ -685,10 +699,11 @@ class Clump:
             split_clumping_ucg = self.split_ucg(self.ucg) #list of subarrays
 
 
-        
         current_threshold = clump_threshold
         self.tree_level=0
-        while current_threshold < args.clump_max:
+        while True:
+            if (not args.find_cold_clumps) and (current_threshold >= args.clump_max):
+                break
             t1=time.time()
             print("Iterating for clump threshold=",current_threshold)
 
@@ -746,7 +761,10 @@ class Clump:
                 struct = None #Default is only neighbors that share faces
                 if args.include_diagonal_neighbors:
                     struct = np.ones((3,3,3)) #get diagonal neighbors as well
-                self.clump_ids, num_features = label((self.ucg>current_threshold),structure=struct)
+                march_mask = (self.ucg>current_threshold)
+                if args.find_cold_clumps:
+                    march_mask = (self.ucg<current_threshold)
+                self.clump_ids, num_features = label(march_mask,structure=struct)
                 print("Time to march cubes linearly=",time.time()-t1)
         
             print("Updating clump catalog...")
@@ -773,9 +791,9 @@ class Clump:
                 print("No clumps found at this threshold...terminating")
                 return
 
+            if args.find_cold_clumps:
+                break
 
-              
-                    
             current_threshold *= args.step
             self.tree_level+=1
   
@@ -893,7 +911,10 @@ def iterate_clump_marching_cubes(args,minval,maxval,ucg_subarray,thread_id):
     if args.include_diagonal_neighbors:
         struct = np.ones((3,3,3))
 
-    clump_id, num_features = label((ucg_subarray>minval),structure=struct)
+    march_mask = (ucg_subarray>minval)
+    if args.find_cold_clumps:
+        march_mask = (ucg_subarray<minval)
+    clump_id, num_features = label(march_mask,structure=struct)
     #print("Subarray "+str(thread_id)+": Finished Marching Cubes in",time.time()-t_mc)
     return clump_id 
             
@@ -936,6 +957,33 @@ def iterate_get_clump_cell_ids(args,thread_id, clump_id_subarray, cell_id_subarr
     return clump_cell_ids
 
 
+def configure_cold_clump_args(args):
+    '''
+    Apply default settings when searching for cold (temperature-limited) clumps.
+    '''
+    if not getattr(args, "find_cold_clumps", False):
+        return args
+
+    if getattr(args, "_cold_clump_configured", False):
+        return args
+
+    if getattr(args, "cold_temperature_threshold", None) is None:
+        args.cold_temperature_threshold = 10**4.5
+
+    args.clumping_field_type = "gas"
+    args.clumping_field = "temperature"
+
+    if args.step is None or args.step <= 1:
+        args.step = 2
+
+    args.clump_min = args.cold_temperature_threshold
+    if args.clump_max is None or args.clump_max <= args.clump_min:
+        args.clump_max = args.clump_min * args.step
+
+    args._cold_clump_configured = True
+    print(f"Cold clump mode enabled: finding T < {args.cold_temperature_threshold:.2e} K.")
+    return args
+
 
 def identify_clump_hierarchy(ds,cut_region,args):
     '''
@@ -947,9 +995,13 @@ def identify_clump_hierarchy(ds,cut_region,args):
     cut_region: The cut region you want to run the clump finder on. Could technically be something beyond just the refine_box
     args: the system arguments parsed by clump_finder_argparser.py
     '''
+    args = configure_cold_clump_args(args)
     #define ds, make sure no data is loaded
     tmp_step = args.step
     tmp_clump_min = args.clump_min
+
+    if args.clumping_field_type is not None and isinstance(args.clumping_field, str):
+        args.clumping_field = (args.clumping_field_type, args.clumping_field)
     
     print("Clump min was set to",args.clump_min)
     
@@ -1116,6 +1168,8 @@ def clump_finder(args,ds,cut_region):
         #Set default arguments for disk finder
         args = set_default_disk_finder_arguments(args)
 
+    args = configure_cold_clump_args(args)
+
     trident_dict = { 'HI':'H I', 'CII':'C II','CIII':'C III',
                 'CIV':'C IV','OVI':'O VI','SiII':'Si II','SiIII':'Si III','SiIV':'Si IV','MgII':'Mg II'}
 
@@ -1194,6 +1248,8 @@ def disk_finder(ds,cut_region,output=None,return_output_filename=False, args=Non
     if args.auto_disk_finder:
         #Set default arguments for disk finder
         args = set_default_disk_finder_arguments(args)
+
+    args = configure_cold_clump_args(args)
 
     trident_dict = { 'HI':'H I', 'CII':'C II','CIII':'C III',
                 'CIV':'C IV','OVI':'O VI','SiII':'Si II','SiIII':'Si III','SiIV':'Si IV','MgII':'Mg II'}
@@ -1296,6 +1352,8 @@ def satellite_finder(ds,cut_region,output=None,return_output_filename=False, arg
         #Set default arguments for disk finder
         args = set_default_disk_finder_arguments(args)
 
+    args = configure_cold_clump_args(args)
+
     trident_dict = { 'HI':'H I', 'CII':'C II','CIII':'C III',
                 'CIV':'C IV','OVI':'O VI','SiII':'Si II','SiIII':'Si III','SiIV':'Si IV','MgII':'Mg II'}
 
@@ -1356,6 +1414,8 @@ if __name__ == "__main__":
     if args.auto_disk_finder:
         #Set default arguments for disk finder
         args = set_default_disk_finder_arguments(args)
+
+    args = configure_cold_clump_args(args)
 
     t0 = time.time()
 
