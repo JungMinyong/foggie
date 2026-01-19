@@ -30,7 +30,7 @@ from foggie.clumps.clump_finder.fill_topology import expand_slice
 from foggie.clumps.clump_finder.fill_topology import generate_connectivity_matrix
 
 from foggie.clumps.clump_finder.utils_clump_finder import save_clump_hierarchy
-
+from foggie.clumps.clump_finder import merge_clumps
 
 import matplotlib.pyplot as plt
 #from matplotlib.colors import LogNorm
@@ -708,7 +708,7 @@ class Clump:
             print("Iterating for clump threshold=",current_threshold)
 
             if parallelize_marching_cubes:
-                from foggie.clumps.clump_finder import merge_clumps
+                #from foggie.clumps.clump_finder import merge_clumps
                 _iterate_clump_marching_cubes = partial(iterate_clump_marching_cubes,args=args,minval=current_threshold,maxval=None)
 
                 print("Marching cubes...")
